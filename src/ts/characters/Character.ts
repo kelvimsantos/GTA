@@ -71,7 +71,21 @@ export class Character extends THREE.Object3D implements IWorldEntity
 	public groundImpactData: GroundImpactData = new GroundImpactData();
 	public raycastBox: THREE.Mesh;
 	
+	// Weapons
+	public weapons: any[] = [];
+	public currentWeaponIndex: number = 0;
+	public isAiming: boolean = false;
+	public lastShotTime: number = 0;
+	public lastShotRay: { start: THREE.Vector3, end: THREE.Vector3 } = null;
+	public recoilCurrent: number = 0;
+	public recoilRecovery: number = 6; // degrees per second
+	public aimOffsetRight: number = 0.50;
+	public domCrosshair: HTMLElement = null;
+	public crosshairDistance: number = 1;
+	public crosshair: THREE.Mesh;
+	
 	public world: World;
+
 	public charState: ICharacterState;
 	public behaviour: ICharacterAI;
 	
@@ -118,12 +132,29 @@ export class Character extends THREE.Object3D implements IWorldEntity
 			'enter': new KeyBinding('KeyF'),
 			'enter_passenger': new KeyBinding('KeyG'),
 			'seat_switch': new KeyBinding('KeyX'),
-			'primary': new KeyBinding('Mouse0'),
-			'secondary': new KeyBinding('Mouse1'),
+			'primary': new KeyBinding('Mouse0','mouse0'),
+			'secondary': new KeyBinding('Mouse2','mouse2'),
+			'switch_weapon': new KeyBinding('KeyP'),
 		};
 
 		// Physics
 		// Player Capsule
+		// Default weapons
+		this.weapons = [
+			{ name: 'Pistol', range: 100, cooldown: 0.25, impulse: 50, automatic: true },
+			{ name: 'Rifle', range: 200, cooldown: 0.12, impulse: 35, automatic: true }
+		];
+		this.currentWeaponIndex = 0;
+		this.lastShotTime = 0;
+
+		// Crosshair (created but not attached until aiming)
+		const chGeo = new THREE.RingGeometry(0.008, 0.014, 32);
+		const chMat = new THREE.MeshBasicMaterial({ color: 0xff8800, side: THREE.DoubleSide, depthTest: false, depthWrite: false, transparent: true, opacity: 0.95 });
+		this.crosshair = new THREE.Mesh(chGeo, chMat);
+		this.crosshair.frustumCulled = false;
+		this.crosshair.renderOrder = 9999;
+		this.crosshair.matrixAutoUpdate = true;
+
 		this.characterCapsule = new CapsuleCollider({
 			mass: 1,
 			position: new CANNON.Vec3(),
@@ -379,6 +410,128 @@ export class Character extends THREE.Object3D implements IWorldEntity
 			// Reset the 'just' attributes
 			action.justPressed = false;
 			action.justReleased = false;
+
+			// Weapon and input side-effects
+			if (actionName === 'primary' && value === true)
+			{
+				if (this.isAiming) { this.fireWeapon(); }
+			}
+
+			if (actionName === 'secondary')
+			{
+				this.isAiming = value;
+			}
+
+			if (actionName === 'switch_weapon' && value === true)
+			{
+				this.nextWeapon();
+			}
+		}
+	}
+
+	public nextWeapon(): void
+	{
+		if (this.weapons.length === 0) return;
+		this.currentWeaponIndex = (this.currentWeaponIndex + 1) % this.weapons.length;
+		const w = this.weapons[this.currentWeaponIndex];
+		console.log('Switched to weapon: ' + w.name);
+	}
+
+	public fireWeapon(): void
+	{
+		if (!this.world) return;
+
+		const weapon = this.weapons[this.currentWeaponIndex] || { name: 'Pistol', range: 100, cooldown: 0.2, impulse: 50 };
+		const now = (typeof performance !== 'undefined') ? performance.now() / 1000 : (Date.now() / 1000);
+		if (now - this.lastShotTime < weapon.cooldown) return;
+		this.lastShotTime = now;
+
+		// Raycast from camera (center)
+		const cam = this.world.camera;
+		const originThree = new THREE.Vector3();
+		cam.getWorldPosition(originThree);
+		const dir = new THREE.Vector3();
+		cam.getWorldDirection(dir);
+		const endThree = new THREE.Vector3().copy(originThree).add(dir.clone().multiplyScalar(weapon.range));
+
+		// Record last shot ray for debugging
+		this.lastShotRay = { start: originThree.clone(), end: endThree.clone() };
+
+		// Debug visuals: origin marker, tracer line, muzzle flash
+		const originDebug = new THREE.Mesh(new THREE.SphereGeometry(0.03, 6, 6), new THREE.MeshBasicMaterial({ color: 0x00ff00 }));
+		originDebug.position.copy(originThree);
+		this.world.graphicsWorld.add(originDebug);
+		setTimeout(() => { try { this.world.graphicsWorld.remove(originDebug); } catch(e){} }, 400);
+
+		// Tracer starts a little forward from camera so it appears from weapon muzzle
+		const tracerStart = new THREE.Vector3().copy(originThree).add(dir.clone().multiplyScalar(1.2));
+		const tracerGeo = new THREE.BufferGeometry().setFromPoints([tracerStart, endThree]);
+		const tracerMat = new THREE.LineBasicMaterial({ color: 0xff8800 }); // orange tracer
+		const tracer = new THREE.Line(tracerGeo, tracerMat);
+		this.world.graphicsWorld.add(tracer);
+		setTimeout(() => { try { this.world.graphicsWorld.remove(tracer); } catch(e){} }, 300);
+
+		const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.03, 8, 8), new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.95 }));
+		muzzle.position.copy(tracerStart);
+		this.world.graphicsWorld.add(muzzle);
+		setTimeout(() => { try { this.world.graphicsWorld.remove(muzzle); } catch(e){} }, 120);
+
+		// Flash UI crosshair on shot
+		if (this.domCrosshair)
+		{
+			try {
+				this.domCrosshair.style.transition = 'transform 0.08s ease, opacity 0.15s ease';
+				this.domCrosshair.style.opacity = '1';
+				this.domCrosshair.style.transform = 'translate(-50%, -50%) scale(1.4)';
+				setTimeout(() => {
+					this.domCrosshair.style.transform = 'translate(-50%, -50%) scale(1)';
+					this.domCrosshair.style.opacity = '0.9';
+				}, 80);
+			} catch(e){}
+		}
+
+		// Recoil
+		const recoilAmount = 2.0; // degrees
+		if (this.world.cameraOperator) {
+			this.world.cameraOperator.phi -= recoilAmount;
+			this.recoilCurrent += recoilAmount;
+		}
+
+		const start = new CANNON.Vec3(originThree.x, originThree.y, originThree.z);
+		const end = new CANNON.Vec3(endThree.x, endThree.y, endThree.z);
+		const result = new CANNON.RaycastResult();
+		const options = { collisionFilterMask: CollisionGroups.Default, skipBackfaces: true };
+
+		const hit = this.world.physicsWorld.raycastClosest(start, end, options, result);
+		console.log('Shot:', weapon.name, 'from', originThree.toArray(), 'dir', dir.toArray(), 'hit:', hit);
+
+		if (hit)
+		{
+			// Visual impact
+			const impactGeo = new THREE.SphereGeometry(0.06, 6, 6);
+			const impactMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+			const impact = new THREE.Mesh(impactGeo, impactMat);
+			impact.position.set(result.hitPointWorld.x, result.hitPointWorld.y, result.hitPointWorld.z);
+			this.world.graphicsWorld.add(impact);
+
+			setTimeout(() => { try { this.world.graphicsWorld.remove(impact); } catch(e){} }, 400);
+
+			// Apply impulse to hit body if dynamic
+			if (result.body && result.body.mass > 0)
+			{
+				const impulse = new CANNON.Vec3(dir.x * weapon.impulse, dir.y * weapon.impulse, dir.z * weapon.impulse);
+				result.body.applyImpulse(impulse, result.hitPointWorld);
+			}
+		}
+		else
+		{
+			// Miss visual (optional)
+			const missGeo = new THREE.SphereGeometry(0.02, 6, 6);
+			const missMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+			const miss = new THREE.Mesh(missGeo, missMat);
+			miss.position.copy(endThree);
+			this.world.graphicsWorld.add(miss);
+			setTimeout(() => { try { this.world.graphicsWorld.remove(miss); } catch(e){} }, 200);
 		}
 	}
 
@@ -431,6 +584,14 @@ export class Character extends THREE.Object3D implements IWorldEntity
 
 			this.characterCapsule.body.position.copy(Utils.cannonVector(newPos));
 			this.characterCapsule.body.interpolatedPosition.copy(Utils.cannonVector(newPos));
+		}
+
+		// Recoil recovery (lerp camera back)
+		if (this.recoilCurrent && this.recoilCurrent > 0 && this.world && this.world.cameraOperator)
+		{
+			const recover = Math.min(this.recoilCurrent, this.recoilRecovery * timeStep);
+			this.world.cameraOperator.phi += recover;
+			this.recoilCurrent -= recover;
 		}
 
 		this.updateMatrixWorld();
@@ -491,7 +652,61 @@ export class Character extends THREE.Object3D implements IWorldEntity
 		{
 			// Look in camera's direction
 			this.viewVector = new THREE.Vector3().subVectors(this.position, this.world.camera.position);
-			this.getWorldPosition(this.world.cameraOperator.target);
+			// compute base target (player world position)
+			const baseTarget = new THREE.Vector3();
+			this.getWorldPosition(baseTarget);
+
+				// Manage UI crosshair visibility
+				if (typeof document !== 'undefined') {
+					if (!this.domCrosshair) {
+						const el = document.getElementById('ui-crosshair');
+						if (el) this.domCrosshair = el as HTMLElement;
+					}
+					if (this.domCrosshair) {
+						this.domCrosshair.style.display = this.isAiming ? 'block' : 'none';
+					}
+				}
+
+			// Zoom in and offset when aiming
+			if (this.isAiming && this.world?.camera)
+			{
+				this.world.cameraOperator.setRadius(1.2); // smaller zoom to avoid clipping
+				// shift camera target slightly to the right so weapon appears more on-screen right (no accumulation)
+				const camRight = Utils.getRight(this.world.camera).clone();
+				const offset = camRight.multiplyScalar(this.aimOffsetRight);
+				const targetPos = baseTarget.add(offset);
+				this.world.cameraOperator.target.copy(targetPos);
+
+				// show crosshair on camera (only once)
+				if (this.world.camera && this.crosshair && !this.world.camera.children.includes(this.crosshair))
+				{
+					this.crosshair.position.set(0, 0, -this.crosshairDistance);
+					this.crosshair.rotation.set(0,0,0);
+					this.world.camera.add(this.crosshair);
+				}
+			}
+			else
+			{
+				this.world.cameraOperator.setRadius(1.6);
+				this.world.cameraOperator.target.copy(baseTarget);
+
+				// remove crosshair if present
+				if (this.world.camera && this.crosshair && this.world.camera.children.includes(this.crosshair))
+				{
+					try { this.world.camera.remove(this.crosshair); } catch(e){}
+				}
+			}
+
+			// Automatic fire while holding primary
+			if (this.actions.primary?.isPressed && this.isAiming)
+			{
+				const weapon = this.weapons[this.currentWeaponIndex] || { cooldown: 0.2 };
+				const now = (typeof performance !== 'undefined') ? performance.now() / 1000 : (Date.now() / 1000);
+				if (weapon.automatic && now - this.lastShotTime >= weapon.cooldown)
+				{
+					this.fireWeapon();
+				}
+			}
 		}
 		
 	}

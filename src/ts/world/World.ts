@@ -503,7 +503,14 @@ export class World
 
 		// UI
 		$(`	<div id="ui-container" style="display: none;">
+				<!-- Mira (target) - controlled by Character.ts -->
+				<div id="ui-crosshair" style="position: fixed; left: 50%; top: 50%; width: 34px; height: 34px; transform: translate(-50%, -50%); z-index: 99999; pointer-events: none; display: none;">
+					<div style="position: absolute; left: 50%; top: 50%; width: 2px; height: 34px; background: rgba(219, 0, 0, 0.95); transform: translate(-50%, -50%);"></div>
+					<div style="position: absolute; left: 50%; top: 50%; width: 34px; height: 2px; background: rgba(219, 0, 0, 0.95); transform: translate(-50%, -50%);"></div>
+					<div style="position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; background: rgba(255, 255, 255, 0.95); border-radius: 999px; transform: translate(-50%, -50%); box-shadow: 0 0 12px rgba(255,0,0,0.45);"></div>
+				</div>
 				<div class="github-corner">
+
 					<a href="https://github.com/swift502/Sketchbook" target="_blank" title="Fork me on GitHub">
 						<svg viewbox="0 0 100 100" fill="currentColor">
 							<title>Fork me on GitHub</title>
@@ -535,6 +542,7 @@ export class World
 			FXAA: true,
 			Debug_Physics: false,
 			Debug_FPS: false,
+			Debug_Weapons_Crosshair: true,
 			Sun_Elevation: 50,
 			Sun_Rotation: 145,
 		};
